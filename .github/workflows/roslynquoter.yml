@@ -1,48 +1,119 @@
-name: Build and deploy .NET Core application to Web App roslynquoter
+name: Deploy MedServices to Azure Static Web Apps
+
 on:
   push:
-    branches:
-    - main
-env:
-  AZURE_WEBAPP_NAME: roslynquoter
-  AZURE_WEBAPP_PACKAGE_PATH: src\Quoter.Web\published
-  CONFIGURATION: Release
-  DOTNET_CORE_VERSION: 6.0.x
-  WORKING_DIRECTORY: src\Quoter.Web
+    branches: [ "master", "main" ]
+
 jobs:
-  build:
-    runs-on: windows-latest
+  build_and_deploy:
+    runs-on: ubuntu-latest
+
     steps:
-    - uses: actions/checkout@v4
-    - name: Setup .NET Core
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: ${{ env.DOTNET_CORE_VERSION }}
-    - name: Restore
-      run: dotnet restore "${{ env.WORKING_DIRECTORY }}"
-    - name: Build
-      run: dotnet build "${{ env.WORKING_DIRECTORY }}" --configuration ${{ env.CONFIGURATION }} --no-restore
-    - name: Test
-      run: dotnet test "${{ env.WORKING_DIRECTORY }}" --no-build
-    - name: Publish
-      run: dotnet publish "${{ env.WORKING_DIRECTORY }}" --configuration ${{ env.CONFIGURATION }} --no-build --output "${{ env.AZURE_WEBAPP_PACKAGE_PATH }}"
-    - name: Publish Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: webapp
-        path: ${{ env.AZURE_WEBAPP_PACKAGE_PATH }}
-  deploy:
-    runs-on: windows-latest
-    needs: build
-    steps:
-    - name: Download artifact from build job
-      uses: actions/download-artifact@v4
-      with:
-        name: webapp
-        path: ${{ env.AZURE_WEBAPP_PACKAGE_PATH }}
-    - name: Deploy to Azure WebApp
-      uses: azure/webapps-deploy@v2
-      with:
-        app-name: ${{ env.AZURE_WEBAPP_NAME }}
-        publish-profile: ${{ secrets.roslynquoter_186F }}
-        package: ${{ env.AZURE_WEBAPP_PACKAGE_PATH }}
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Tailwind CSS
+        run: npm install -g @tailwindcss/cli tailwindcss
+
+      - name: Build Tailwind CSS
+        run: |
+          mkdir -p wwwroot/css
+          tailwindcss -i Styles/app.css -o wwwroot/css/app.css --minify
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Publish Blazor
+        run: dotnet publish -c Release -o published --nologo
+
+      - name: Prepare deployment artifacts
+        run: |
+          # Создаем чистую папку для деплоя
+          rm -rf deploy
+          mkdir deploy
+          
+          # КОПИРУЕМ ВСЁ СОДЕРЖИМОЕ ПАПКИ published, а не только wwwroot
+          echo "Copying all published artifacts..."
+          cp -r published/* deploy/
+          
+          # Если папка wwwroot существует внутри deploy, копируем её содержимое в корень
+          # (для статического сайта файлы должны быть в корне)
+          if [ -d "deploy/wwwroot" ]; then
+            echo "Moving contents of deploy/wwwroot to deploy root..."
+            cp -r deploy/wwwroot/* deploy/
+            rm -rf deploy/wwwroot
+          fi
+          
+          # Убеждаемся, что CSS файл Tailwind на месте
+          if [ -f wwwroot/css/app.css ]; then
+            mkdir -p deploy/css
+            cp wwwroot/css/app.css deploy/css/app.css
+            echo "✅ Tailwind CSS copied to deploy/css/app.css"
+          fi
+          
+          # Проверка наличия критических файлов
+          echo ""
+          echo "=== CRITICAL FILES VERIFICATION ==="
+          
+          # 1. Проверяем MedServices.styles.css
+          if [ -f "deploy/MedServices.styles.css" ]; then
+            echo "✅ MedServices.styles.css found in deploy root"
+          else
+            echo "⚠️ MedServices.styles.css not found in root, searching..."
+            find deploy -name "MedServices.styles.css" -type f
+          fi
+          
+          # 2. Проверяем папку _content (для Syncfusion и других библиотек)
+          if [ -d "deploy/_content" ]; then
+            echo "✅ _content folder found"
+            echo "Contents of _content:"
+            ls -la deploy/_content/
+          else
+            echo "⚠️ _content folder not found in deploy"
+          fi
+          
+          # 3. Проверяем Blazor framework
+          if [ -d "deploy/_framework" ]; then
+            echo "✅ _framework folder found"
+          else
+            echo "❌ _framework folder NOT found!"
+          fi
+          
+          # 4. Показываем общую структуру
+          echo ""
+          echo "=== DEPLOY FOLDER STRUCTURE ==="
+          ls -la deploy/ | head -20
+
+      - name: Create staticwebapp.config.json
+        run: |
+          cat > deploy/staticwebapp.config.json << 'EOF'
+          {
+            "navigationFallback": {
+              "rewrite": "/index.html",
+              "exclude": ["/css/*", "/_content/*", "/_framework/*"]
+            },
+            "mimeTypes": {
+              ".css": "text/css",
+              ".wasm": "application/wasm",
+              ".dll": "application/octet-stream"
+            }
+          }
+          EOF
+          echo "✅ staticwebapp.config.json created"
+
+      - name: Deploy to Azure Static Web Apps
+        uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_MANGO_MEADOW_081780E1E }}
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          action: "upload"
+          app_location: "deploy"
+          output_location: "."
+          api_location: ""
+          skip_app_build: true
